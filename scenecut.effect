@@ -1,0 +1,33 @@
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform float edge;
+uniform bool dark_preview;
+sampler_state linear_sampler {
+    Filter = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+struct Vertex {
+    float4 pos : POSITION;
+    float2 uv : TEXCOORD0;
+};
+Vertex transform_vertex(Vertex v)
+{
+    v.pos = mul(float4(v.pos.xyz, 1.0), ViewProj);
+    return v;
+}
+float4 finish_portrait(Vertex v) : TARGET
+{
+    float4 pixel = image.Sample(linear_sampler, v.uv);
+    float alpha = saturate((pixel.a - edge) / (1.0 - edge));
+    float3 color = pixel.rgb * (alpha / max(pixel.a, 0.00001));
+    if (dark_preview)
+        return float4(color + float3(0.08, 0.09, 0.12) * (1.0 - alpha), 1.0);
+    return float4(color, alpha);
+}
+technique Draw {
+    pass {
+        vertex_shader = transform_vertex(v);
+        pixel_shader = finish_portrait(v);
+    }
+}
