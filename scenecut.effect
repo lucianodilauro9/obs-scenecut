@@ -1,33 +1,33 @@
 uniform float4x4 ViewProj;
 uniform texture2d image;
+uniform texture2d portrait_mask;
 uniform float edge;
 uniform bool dark_preview;
-sampler_state linear_sampler {
-    Filter = Linear;
-    AddressU = Clamp;
-    AddressV = Clamp;
-};
-struct Vertex {
-    float4 pos : POSITION;
-    float2 uv : TEXCOORD0;
-};
-Vertex transform_vertex(Vertex v)
-{
-    v.pos = mul(float4(v.pos.xyz, 1.0), ViewProj);
-    return v;
-}
+sampler_state linear_sampler { Filter = Linear; AddressU = Clamp; AddressV = Clamp; };
+struct Vertex { float4 pos : POSITION; float2 uv : TEXCOORD0; };
+Vertex transform_vertex(Vertex v) { v.pos = mul(float4(v.pos.xyz,1.0),ViewProj); return v; }
 float4 finish_portrait(Vertex v) : TARGET
 {
-    float4 pixel = image.Sample(linear_sampler, v.uv);
-    float alpha = saturate((pixel.a - edge) / (1.0 - edge));
-    float3 color = pixel.rgb * (alpha / max(pixel.a, 0.00001));
-    if (dark_preview)
-        return float4(color + float3(0.08, 0.09, 0.12) * (1.0 - alpha), 1.0);
-    return float4(color, alpha);
-}
-technique Draw {
-    pass {
-        vertex_shader = transform_vertex(v);
-        pixel_shader = finish_portrait(v);
+    float4 pixel = image.Sample(linear_sampler,v.uv);
+    float a = portrait_mask.Sample(linear_sampler,v.uv).r;
+    // Near a boundary, prefer mask taps whose webcam colour resembles this pixel.
+    if (a > 0.02 && a < 0.98) {
+        float sum = 0.0;
+        float total = 0.0;
+        for (int y=-1; y<=1; ++y) {
+            for (int x=-1; x<=1; ++x) {
+                float2 uv=v.uv+float2(x/256.0,y/144.0);
+                float3 delta=image.Sample(linear_sampler,uv).rgb-pixel.rgb;
+                float weight = 1.0 / ((1.0+x*x+y*y)*(1.0+72.0*dot(delta,delta)));
+                sum += weight*portrait_mask.Sample(linear_sampler,uv).r;
+                total += weight;
+            }
+        }
+        a=sum/total;
     }
+    a=smoothstep(0.055+0.34*edge,0.95,a);
+    float4 out_color=float4(pixel.rgb*a,pixel.a*a);
+    if (dark_preview) return float4(out_color.rgb+float3(0.08,0.09,0.12)*(1.0-out_color.a),1.0);
+    return out_color;
 }
+technique Draw { pass { vertex_shader=transform_vertex(v); pixel_shader=finish_portrait(v); } }

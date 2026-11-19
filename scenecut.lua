@@ -1,110 +1,120 @@
--- SceneCut for OBS Studio. Copyright 2026 Luciano Di Lauro.
-local obs = obslua
-local filter_id = "scenecut_portrait_finish_v1"
-local engine_id = "background_removal"
-local instances = {}
-local effect_path = script_path() .. "scenecut.effect"
-
-local function upstream_engine(source)
-    local parent = obs.obs_filter_get_parent(source)
-    if not parent then return nil end
-    local target = obs.obs_filter_get_target(source)
-    while target and obs.obs_source_get_type(target) == obs.OBS_SOURCE_TYPE_FILTER do
-        if obs.obs_source_get_id(target) == engine_id then return target end
-        target = obs.obs_filter_get_target(target)
-    end
+-- SceneCut 0.2.0, Windows x64. Keep the original filter ID for existing scenes.
+local o=obslua
+local root=script_path()
+local bridge=dofile(root.."engine/bridge.lua")
+local filter={id="scenecut_portrait_finish_v1",type=o.OBS_SOURCE_TYPE_FILTER,output_flags=o.OBS_SOURCE_VIDEO}
+filter.get_name=function() return "SceneCut" end
+filter.get_defaults=function(s)
+    o.obs_data_set_default_int(s,"edge",12)
+    o.obs_data_set_default_int(s,"stability",35)
+    o.obs_data_set_default_bool(s,"preview",false)
 end
-
--- Apply changes on the OBS scripting timer, outside the graphics callback.
--- Keep the upstream filter's other settings and avoid restarting inference each tick.
-local function sync_engines()
-    for data in pairs(instances) do
-        local engine = upstream_engine(data.source)
-        if engine and obs.obs_source_enabled(data.source) then
-            local settings = obs.obs_source_get_settings(engine)
-            local current = obs.obs_data_get_double(settings, "temporal_smooth_factor")
-            if math.abs(current - data.weight) > 0.0001 then
-                obs.obs_data_set_double(settings, "temporal_smooth_factor", data.weight)
-                obs.obs_source_update(engine, settings)
-            end
-            obs.obs_data_release(settings)
+filter.update=function(d,s)
+    d.edge=o.obs_data_get_int(s,"edge")/100
+    d.stability=o.obs_data_get_int(s,"stability")
+    d.preview=o.obs_data_get_bool(s,"preview")
+end
+local function target() return o.gs_texrender_create(o.GS_RGBA,o.GS_ZS_NONE) end
+filter.create=function(settings,source)
+    local d={source=source, tick=true, width=0,height=0,valid=false}
+    o.obs_enter_graphics()
+    d.effect=o.gs_effect_create_from_file(root.."scenecut.effect",nil)
+    if d.effect then
+        d.image=o.gs_effect_get_param_by_name(d.effect,"image")
+        d.refine=o.gs_effect_get_param_by_name(d.effect,"edge")
+        d.dark=o.gs_effect_get_param_by_name(d.effect,"dark_preview")
+        while o.gs_effect_loop(d.effect,"Draw") do d.mask=bridge.mask_param() end
+        d.front,d.pending,d.small=target(),target(),target()
+    end
+    o.obs_leave_graphics()
+    if not d.effect then o.script_log(o.LOG_ERROR,"SceneCut: shader mancante o incompatibile.");return nil end
+    filter.update(d,settings)
+    return d
+end
+local function stop_engine(d)
+    if d.engine then bridge.close(d.engine);d.engine=nil end
+    d.valid=false
+end
+filter.destroy=function(d)
+    o.obs_enter_graphics()
+    stop_engine(d)
+    o.gs_texrender_destroy(d.front);o.gs_texrender_destroy(d.pending);o.gs_texrender_destroy(d.small)
+    o.gs_effect_destroy(d.effect)
+    o.obs_leave_graphics()
+end
+filter.get_properties=function(d)
+    local p=o.obs_properties_create()
+    o.obs_properties_add_text(p,"info",d and d.error or "Scontorno IA locale. Posiziona la webcam sopra lo sfondo nella scena.",o.OBS_TEXT_INFO)
+    o.obs_properties_add_int_slider(p,"edge","Rifinitura bordi",0,90,1)
+    o.obs_properties_add_int_slider(p,"stability","Stabilit� in movimento",0,100,1)
+    o.obs_properties_add_bool(p,"preview","Anteprima su fondo scuro")
+    return p
+end
+filter.video_tick=function(d) d.tick=true end
+filter.activate=function(d) d.restart=true end
+local function start_target(t,w,h)
+    o.gs_texrender_reset(t)
+    if not o.gs_texrender_begin(t,w,h) then return false end
+    o.gs_ortho(0,w,0,h,-100,100)
+    return true
+end
+local function submit(d,w,h)
+    if not start_target(d.pending,w,h) then return end
+    local base=o.obs_get_base_effect(o.OBS_EFFECT_DEFAULT)
+    local got=o.obs_source_process_filter_begin(d.source,o.GS_RGBA,o.OBS_NO_DIRECT_RENDERING)
+    if got then o.obs_source_process_filter_end(d.source,base,w,h) end
+    o.gs_texrender_end(d.pending)
+    if not got or not start_target(d.small,bridge.w,bridge.h) then return end
+    local tex=o.gs_texrender_get_texture(d.pending)
+    o.gs_effect_set_texture(o.gs_effect_get_param_by_name(base,"image"),tex)
+    while o.gs_effect_loop(base,"Draw") do o.gs_draw_sprite(tex,0,bridge.w,bridge.h) end
+    bridge.capture(d.engine,d.stability)
+    o.gs_texrender_end(d.small)
+end
+local function failure(d,reason)
+    stop_engine(d)
+    d.error=reason
+    o.script_log(o.LOG_ERROR,"SceneCut: "..reason)
+    o.obs_source_update_properties(d.source)
+end
+filter.video_render=function(d)
+    local src=o.obs_filter_get_target(d.source)
+    if not src or (d.error and not d.restart) then return end
+    local w,h=o.obs_source_get_base_width(src),o.obs_source_get_base_height(src)
+    if w==0 or h==0 then return end
+    if d.restart or w~=d.width or h~=d.height then
+        d.restart=false; d.error=nil
+        stop_engine(d);d.width=w;d.height=h
+    end
+    if not d.engine then
+        local err
+        d.engine,err=bridge.open(root.."engine/SceneCutWorker.exe",o.obs_source_get_uuid(d.source).."_"..tostring(o.os_gettime_ns()))
+        if not d.engine then failure(d,err);return end
+    end
+    if d.tick then
+        d.tick=false
+        local state,err=bridge.state(d.engine)
+        if state==-1 then failure(d,err);return end
+        if state==3 then
+            bridge.receive(d.engine)
+            d.front,d.pending=d.pending,d.front
+            d.valid=true
+            state=0
+        end
+        if state==0 then
+            o.gs_blend_state_push()
+            o.gs_blend_function(o.GS_BLEND_ONE,o.GS_BLEND_ZERO)
+            submit(d,w,h)
+            o.gs_blend_state_pop()
         end
     end
+    if not d.valid then return end
+    local tex=o.gs_texrender_get_texture(d.front)
+    o.gs_effect_set_texture(d.image,tex)
+    bridge.bind(d.engine,d.mask)
+    o.gs_effect_set_float(d.refine,d.edge)
+    o.gs_effect_set_bool(d.dark,d.preview)
+    while o.gs_effect_loop(d.effect,"Draw") do o.gs_draw_sprite(tex,0,w,h) end
 end
-
-local filter = {
-    id = filter_id,
-    type = obs.OBS_SOURCE_TYPE_FILTER,
-    output_flags = obs.OBS_SOURCE_VIDEO,
-    get_name = function() return "SceneCut" end
-}
-
-filter.get_defaults = function(settings)
-    obs.obs_data_set_default_int(settings, "edge", 0)
-    obs.obs_data_set_default_int(settings, "stability", 30)
-    obs.obs_data_set_default_bool(settings, "preview", false)
-end
-
-filter.update = function(data, settings)
-    data.edge = obs.obs_data_get_int(settings, "edge") / 100
-    local stability = obs.obs_data_get_int(settings, "stability") / 100
-    -- The engine weights the CURRENT frame. At zero, switch smoothing off.
-    data.weight = stability == 0 and 0 or 1 - 0.49 * stability
-    data.preview = obs.obs_data_get_bool(settings, "preview")
-end
-
-filter.create = function(settings, source)
-    obs.obs_enter_graphics()
-    local effect = obs.gs_effect_create_from_file(effect_path, nil)
-    obs.obs_leave_graphics()
-    if not effect then
-        obs.script_log(obs.LOG_ERROR, "SceneCut: impossibile caricare scenecut.effect.")
-        return nil
-    end
-    local data = {
-        source = source, effect = effect,
-        edge_param = obs.gs_effect_get_param_by_name(effect, "edge"),
-        preview_param = obs.gs_effect_get_param_by_name(effect, "dark_preview")
-    }
-    filter.update(data, settings)
-    instances[data] = true
-    return data
-end
-
-filter.destroy = function(data)
-    instances[data] = nil
-    obs.obs_enter_graphics()
-    obs.gs_effect_destroy(data.effect)
-    obs.obs_leave_graphics()
-end
-
-filter.get_properties = function()
-    local props = obs.obs_properties_create()
-    obs.obs_properties_add_text(props, "help",
-        "Sulla webcam aggiungi prima Background Removal e poi SceneCut. Imposta la sfocatura del motore a zero.", obs.OBS_TEXT_INFO)
-    local edge = obs.obs_properties_add_int_slider(props, "edge", "Rifinitura bordi", 0, 90, 1)
-    obs.obs_property_set_long_description(edge, "Alza il valore per attenuare i pixel semitrasparenti lungo il contorno.")
-    obs.obs_properties_add_int_slider(props, "stability", "Stabilità in movimento", 0, 100, 1)
-    obs.obs_properties_add_bool(props, "preview", "Anteprima su fondo scuro")
-    return props
-end
-
-filter.video_render = function(data)
-    if not obs.obs_source_process_filter_begin(data.source, obs.GS_RGBA, obs.OBS_NO_DIRECT_RENDERING) then return end
-    obs.gs_effect_set_float(data.edge_param, data.edge)
-    obs.gs_effect_set_bool(data.preview_param, data.preview)
-    obs.obs_source_process_filter_end(data.source, data.effect, 0, 0)
-end
-
-function script_description()
-    return "SceneCut 0.1.0 · Prototipo per OBS. Nella webcam aggiungi Background Removal seguito da SceneCut. La modalità scura è visibile anche in registrazione."
-end
-
-function script_load()
-    obs.obs_register_source(filter)
-    obs.timer_add(sync_engines, 500)
-end
-
-function script_unload()
-    obs.timer_remove(sync_engines)
-end
+function script_description() return "SceneCut 0.2.0 � Filtro webcam autonomo per Windows x64. Aggiungi SceneCut nei filtri effetto. Il fondo scuro si vede anche in registrazione." end
+function script_load() o.obs_register_source(filter) end

@@ -1,23 +1,34 @@
 # SceneCut per OBS Studio
 
-Prototipo 0.1.0 per Windows x64. Il filtro SceneCut si carica tramite il supporto Lua incluso in OBS. OBS Background Removal 1.5.0 elabora la webcam sul PC e fornisce la maschera di trasparenza. SceneCut rifinisce i pixel semitrasparenti, regola la stabilizzazione del motore e permette di vedere subito eventuali residui sullo sfondo.
+SceneCut scontorna la persona ripresa dalla webcam. Il filtro per Windows x64 include il modello MediaPipe in formato ONNX ed esegue l'inferenza sul PC tramite Windows ML. Per usare la versione 0.2.0 basta aggiungere un filtro alla fonte video.
 
-[Scarica SceneCut per Windows (ZIP)](https://github.com/lucianodilauro9/obs-scenecut/archive/refs/heads/main.zip)
+**[Scarica SceneCut 0.2.0 per Windows](https://github.com/lucianodilauro9/obs-scenecut/releases/download/v0.2.0/SceneCut-Setup.exe)**
 
-## Prova con OBS 32.1.2
+## Installazione
 
-1. Estrai l'intera cartella ZIP in una posizione stabile. Lascia insieme `scenecut.lua` e `scenecut.effect`.
-2. Verifica che tra i filtri video di OBS sia disponibile **Background Removal** (in italiano può apparire come **Rimozione sfondo**). Se manca, installa il [motore 1.5.0 per Windows x64](https://github.com/royshil/obs-backgroundremoval/releases/tag/1.5.0) seguendo il file INSTALL.html e riavvia OBS.
-3. Apri **Strumenti → Script**, premi **+** e seleziona `scenecut.lua`.
-4. Apri **Fonti → webcam → Filtri**. Nei filtri effetto aggiungi il motore di rimozione e poi **SceneCut**, nell'ordine indicato dall'alto in basso. Se il motore è già presente, riusalo. Imposta la sua sfocatura a zero e lascia la soglia al valore iniziale di 0,5 per la prima prova.
-5. Nella scena, disponi l'immagine di sfondo sotto la webcam. Seleziona SceneCut e attiva **Anteprima su fondo scuro**. Muovi una mano e gira la testa mentre osservi i capelli. Disattiva l'anteprima prima della registrazione.
+1. Esegui l'installer, scegli **Installa SceneCut** e poi **Copia percorso**. I file sono in `%LOCALAPPDATA%\SceneCut\0.2.0`.
+2. In OBS apri **Strumenti  Script  +**. Incolla il percorso nel campo del nome file e aprilo.
+3. In **Fonti**, apri i filtri della webcam. In **Filtri effetto  +** scegli **SceneCut**.
+4. Posiziona l'immagine di sfondo sotto la webcam nell'elenco Fonti.
 
-## Controlli
+Se usi la 0.1.0, annota i tuoi valori e rimuovi il vecchio script da Strumenti  Script prima di caricare la nuova copia. Disabilita i precedenti filtri di rimozione o di chiave colore sulla webcam. Per installare manualmente estrai lo ZIP dei sorgenti e carica `scenecut.lua`, mantenendo la cartella `engine` e lo shader accanto allo script.
 
-- **Rifinitura bordi** attenua l'alone sui contorni. Parti da zero e sali gradualmente. Un valore elevato può cancellare dettagli sottili.
-- **Stabilità in movimento** regola il peso dei fotogrammi precedenti nel motore. Il valore zero disattiva la media temporale. Riduci il valore se le mani lasciano una scia. Durante l'uso è SceneCut a controllare il parametro temporale del motore.
-- **Anteprima su fondo scuro** sostituisce la trasparenza con un colore scuro nella stessa uscita video di OBS. Il cambiamento compare anche in diretta e in registrazione.
+## Regolazione
 
-Se vedi ancora un rettangolo opaco, controlla l'ordine dei due filtri, il loro stato attivo e la sfocatura del motore. I filtri che agiscono sulla stessa fonte vengono condivisi tra le scene che la usano.
+- **Rifinitura bordi** parte da 12. Aumentala gradualmente se vedi un alone. Riducila se perdi dettagli dei capelli.
+- **Stabilit� in movimento** parte da 35. Attenua piccole oscillazioni tra maschere consecutive e riduce la media quando la probabilit� cambia rapidamente. A zero la media temporale � disattivata.
+- **Anteprima su fondo scuro** evidenzia i residui. Il fondo scuro fa parte dell'uscita video: disattivalo prima di registrare.
 
-Il prototipo richiede il motore esterno. L'installer unico e il collaudo con webcam fisica sono previsti per la beta. Per rimuovere SceneCut elimina il suo filtro dalla webcam e poi lo script da Strumenti → Script. Puoi ripristinare la stabilizzazione predefinita del motore al valore 0,85.
+## Funzionamento e limiti
+
+Il motore riceve fotogrammi RGB ridotti a 256 � 144 in memoria condivisa. Un processo separato calcola la probabilit� che ogni pixel appartenga alla persona. Il filtro conserva il fotogramma a piena risoluzione fino all'arrivo della sua maschera: cos� le mani in movimento e la loro sagoma restano sincronizzate. Il costo � una latenza aggiuntiva e la cadenza pu� diminuire sui PC pi� lenti. Lo shader usa i colori vicini per rifinire il bordo e restituisce un'immagine con trasparenza. Il modello lavora sulla CPU, il compositing usa la GPU. I fotogrammi rimangono in memoria locale.
+
+Configurazione verificata: Windows 11 x64, OBS Studio 32.1.2, Direct3D 11, video SDR. Capelli fini, motion blur e oggetti tenuti in mano possono richiedere regolazioni. Se la fonte � vuota all'avvio, attendi il caricamento. In caso di errore apri le propriet� di SceneCut o il registro OBS. Il messaggio indica se manca il motore o se Windows ML ha restituito un errore.
+
+Per disinstallare rimuovi il filtro, rimuovi lo script da OBS e cancella la cartella della versione dalla tua cartella SceneCut.
+
+## Modello e compilazione
+
+Il modello MediaPipe proviene dal pacchetto [OBS Background Removal 1.5.0](https://github.com/royshil/obs-backgroundremoval/releases/tag/1.5.0). Attribuzioni e licenza Apache 2.0 si trovano in `engine/portrait.onnx.license` e `engine/Apache-2.0.txt`. Il codice del filtro, dello shader, del processo Windows ML e dell'installer � incluso nel repository.
+
+Per ricompilare il processo e l'installer usa Windows PowerShell e avvia `packaging/build.ps1` su Windows x64 con .NET Framework 4.x e i metadati Windows.AI. L'installer pu� anche estrarre il pacchetto in una cartella dedicata con `SceneCut-Setup.exe --extract CARTELLA`.
